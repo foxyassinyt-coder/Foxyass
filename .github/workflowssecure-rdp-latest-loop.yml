@@ -1,0 +1,99 @@
+name: Secure RDP-Latest (Automated Loop)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gh_api_token:
+        description: "🔒 ENTER YOUR GITHUB PAT HERE (Starts with ghp_...)"
+        required: true
+        default: ""
+      loops:
+        description: "GHA KHLIHA KHAWYA"
+        required: false
+        default: ""
+
+concurrency:
+  group: rdp-loop-singleton
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - name: 🔒 Executing Secured Core Engine
+        run: |
+          $token = "${{ github.event.inputs.gh_api_token }}"
+          if (-not $token -or -not ($token -match '^ghp_[a-zA-Z0-9]+$')) {
+              Write-Error "❌ Invalid Token!"
+              exit 1
+          }
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          Restart-Service -Name TermService -Force
+
+          $password = "admin@123"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          if (-not (Get-LocalUser -Name "R7X" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "R7X" -Password $securePass -AccountNeverExpires | Out-Null
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member "R7X"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "R7X"
+
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\ts.msi"
+          
+          # تم إصلاح علامات التنصيص هنا لتفادي أيرور التثبيت
+          Start-Process msiexec.exe -ArgumentList "/i", "$env:TEMP\ts.msi", "/quiet", "/norestart" -Wait
+          
+          Remove-Item "$env:TEMP\ts.msi" -Force
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-r7x-${{ github.run_number }} --accept-routes
+          
+          $tsIP = $null; $r = 0
+          while (-not $tsIP -and $r -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5; $r++
+          }
+          if (-not $tsIP) { Write-Error "Network Fail"; exit 1 }
+
+          Write-Host "`n=================="
+          Write-Host "Address: $tsIP"
+          Write-Host "Username: R7X"
+          Write-Host "Password: $password"
+          Write-Host "==================`n"
+
+          $m = 340
+          for ($i = 1; $i -le $m; $i++) {
+              $l = $m - $i
+              Write-Host "[$(Get-Date)] RDP Active: $l min remaining."
+              Start-Sleep -Seconds 60
+          }
+
+          $inputLoops = "${{ github.event.inputs.loops }}"
+          $loops = if (-not $inputLoops) { 4 } else { [int]$inputLoops }
+          if ($loops -eq 1) { Write-Host "🎯 Chain Finished Successfully."; exit 0 }
+          
+          $next = $loops - 1
+          $body = @{
+            ref    = "${{ github.ref_name }}"
+            inputs = @{ gh_api_token = "$token"; loops = "$next" }
+          } | ConvertTo-Json -Depth 5
+
+          Invoke-RestMethod -Method POST `
+            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/secure-rdp-latest-loop.yml/dispatches" `
+            -Headers @{ Authorization = "Bearer $token"; "Accept"="application/vnd.github+json" } `
+            -Body $body
+          Write-Host "✅ Secured handoff executed to loop iteration: $next"
